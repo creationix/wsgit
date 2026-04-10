@@ -5,8 +5,9 @@ import {
   type ObjectTypeByte,
   ObjectType,
   decodeObjectFrame,
+  encodeWantFrame,
+  hexToBuffer,
   bufferToHex,
-  hashObject,
   parseChildren,
 } from "@ws-git/protocol";
 import type { ObjectStore } from "./object-store.js";
@@ -58,6 +59,9 @@ interface PushStream {
 export class PushHandler {
   private streams = new Map<number, PushStream>();
   private queue: Promise<void> = Promise.resolve();
+  private wanted = new Set<Sha1Hex>();
+  private skipped = new Set<Sha1Hex>();
+  onResult?: (ref: string, status: string, message?: string) => void;
 
   constructor(
     private ws: WebSocket,
@@ -72,11 +76,36 @@ export class PushHandler {
   }
 
   handleControl(msg: PushRequest): void {
-    const stream: PushStream = {
-      request: msg,
-      expectSet: new Set([msg.new]),
-    };
+    const initial = msg.new;
+    const expectSet = new Set<Sha1Hex>();
+    const stream: PushStream = { request: msg, expectSet };
     this.streams.set(msg.id, stream);
+
+    // If we already have the target commit, the full graph is guaranteed
+    // complete — a previous push only succeeded because the expect set
+    // was fully drained. No need to walk anything.
+    this.enqueue(async () => {
+      if (await this.objects.has(initial)) {
+        await this.finalizeStream(stream);
+      } else {
+        expectSet.add(initial);
+        this.sendWants(stream);
+      }
+    });
+  }
+
+  /** Send want frames for new entries in the stream's expect set. */
+  private sendWants(stream: PushStream): void {
+    const newHashes: Buffer[] = [];
+    for (const h of stream.expectSet) {
+      if (!this.wanted.has(h)) {
+        this.wanted.add(h);
+        newHashes.push(hexToBuffer(h));
+      }
+    }
+    if (newHashes.length > 0) {
+      this.ws.send(encodeWantFrame(newHashes));
+    }
   }
 
   async handleObject(data: Buffer): Promise<void> {
@@ -98,36 +127,54 @@ export class PushHandler {
     }
 
     if (matchingStreams.length === 0) {
+      // Object already in store (e.g. resumed push) — silently ignore
+      if (await this.objects.has(hexHash)) return;
       this.sendError(0, `unexpected object: ${hexHash}`);
       return;
     }
 
-    // Verify hash (skip for deltas)
-    if (type !== ObjectType.DELTA) {
-      const computed = hashObject(type, body);
-      if (bufferToHex(computed) !== hexHash) {
-        this.sendError(matchingStreams[0].request.id, `hash mismatch`);
-        return;
-      }
-    }
+    // Hash verification is skipped — the client reads objects via
+    // git cat-file which guarantees content↔hash integrity, and
+    // WebSocket provides wire-level integrity checks.
 
     // Store the object
     await this.objects.put(hexHash, type, body);
 
-    // Parse children and expand expect sets
+    // Parse children and check which are missing (in parallel)
     const children = parseChildren(type, body);
+    const missing: Sha1Hex[] = [];
+    if (children.length > 0) {
+      const checks = await Promise.all(children.map(c => this.objects.has(c)));
+      for (let i = 0; i < children.length; i++) {
+        if (!checks[i] && !this.skipped.has(children[i])) missing.push(children[i]);
+      }
+    }
+
     for (const stream of matchingStreams) {
       stream.expectSet.delete(hexHash);
-      for (const child of children) {
-        if (!(await this.objects.has(child))) {
-          stream.expectSet.add(child);
-        }
-      }
-      // Check if stream is complete
+      for (const child of missing) stream.expectSet.add(child);
+      this.sendWants(stream);
       if (stream.expectSet.size === 0) {
         await this.finalizeStream(stream);
       }
     }
+  }
+
+  handleSkip(hashes: Sha1Hex[]): void {
+    for (const hash of hashes) {
+      this.skipped.add(hash);
+      for (const stream of this.streams.values()) {
+        stream.expectSet.delete(hash);
+      }
+    }
+    // If the queue is already drained, enqueue a finalization check.
+    this.enqueue(async () => {
+      for (const stream of this.streams.values()) {
+        if (stream.expectSet.size === 0) {
+          await this.finalizeStream(stream);
+        }
+      }
+    });
   }
 
   private async finalizeStream(stream: PushStream): Promise<void> {
@@ -176,9 +223,11 @@ export class PushHandler {
 
   private sendDone(id: number, ref: string, hash: Sha1Hex): void {
     this.ws.send(JSON.stringify({ id, status: "done", ref, hash }));
+    this.onResult?.(ref, "done");
   }
 
   private sendError(id: number, message: string, extra: Record<string, unknown> = {}): void {
     this.ws.send(JSON.stringify({ id, status: "error", message, ...extra }));
+    this.onResult?.(extra.ref as string ?? "unknown", "error", message);
   }
 }

@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import type { ObjectTypeByte, Sha1Hex } from "@ws-git/protocol";
 import { ObjectType } from "@ws-git/protocol";
@@ -26,24 +26,103 @@ export interface LocalObject {
 }
 
 /**
- * Read a git object from the local repo using `git cat-file`.
+ * Persistent `git cat-file --batch` process for fast object reads.
+ * Protocol: write "<hash>\n" to stdin, read "<hash> <type> <size>\n<body>\n" from stdout.
+ */
+class CatFileBatch {
+  private proc: ChildProcess;
+  private queue: Array<{ resolve: (obj: LocalObject) => void; reject: (err: Error) => void; hash: Sha1Hex }> = [];
+  private buffer = Buffer.alloc(0);
+  private parsing: { hash: Sha1Hex; type: ObjectTypeByte; size: number } | null = null;
+
+  constructor(gitDir?: string) {
+    const opts = gitDir ? { cwd: gitDir } : {};
+    this.proc = spawn("git", ["cat-file", "--batch"], { ...opts, stdio: ["pipe", "pipe", "inherit"] });
+    this.proc.stdout!.on("data", (chunk: Buffer) => this.onData(chunk));
+    this.proc.on("error", (err) => {
+      for (const req of this.queue) req.reject(err);
+      this.queue = [];
+    });
+  }
+
+  read(hash: Sha1Hex): Promise<LocalObject> {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ resolve, reject, hash });
+      this.proc.stdin!.write(hash + "\n");
+    });
+  }
+
+  private onData(chunk: Buffer) {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    this.drain();
+  }
+
+  private drain() {
+    while (this.buffer.length > 0) {
+      if (!this.parsing) {
+        // Look for header line: "<hash> <type> <size>\n"
+        const nlIdx = this.buffer.indexOf(10); // \n
+        if (nlIdx === -1) return;
+        const header = this.buffer.subarray(0, nlIdx).toString();
+        this.buffer = this.buffer.subarray(nlIdx + 1);
+
+        const parts = header.split(" ");
+        if (parts.length < 3 || parts[1] === "missing") {
+          const req = this.queue.shift();
+          if (req) req.reject(new Error(`object not found: ${req.hash}`));
+          continue;
+        }
+        const type = TYPE_MAP[parts[1]];
+        const size = parseInt(parts[2], 10);
+        if (!type) {
+          const req = this.queue.shift();
+          if (req) req.reject(new Error(`unknown type: ${parts[1]}`));
+          // Skip past body + trailing newline
+          if (this.buffer.length >= size + 1) {
+            this.buffer = this.buffer.subarray(size + 1);
+          }
+          continue;
+        }
+        this.parsing = { hash: parts[0], type, size };
+      }
+
+      // Need size bytes + 1 trailing newline
+      if (this.buffer.length < this.parsing.size + 1) return;
+
+      const body = Buffer.from(this.buffer.subarray(0, this.parsing.size));
+      this.buffer = this.buffer.subarray(this.parsing.size + 1);
+      const req = this.queue.shift();
+      if (req) {
+        req.resolve({ type: this.parsing.type, hash: req.hash, body });
+      }
+      this.parsing = null;
+    }
+  }
+
+  close() {
+    this.proc.stdin!.end();
+  }
+}
+
+let batchProc: CatFileBatch | null = null;
+
+function getBatch(): CatFileBatch {
+  if (!batchProc) batchProc = new CatFileBatch();
+  return batchProc;
+}
+
+/**
+ * Read a git object from the local repo using a persistent `git cat-file --batch` process.
  */
 export async function readObject(hash: Sha1Hex, gitDir?: string): Promise<LocalObject> {
-  const opts = gitDir ? { cwd: gitDir } : {};
-
-  // Get type
-  const { stdout: typeStr } = await exec("git", ["cat-file", "-t", hash], opts);
-  const type = TYPE_MAP[typeStr.trim()];
-  if (!type) throw new Error(`Unknown object type: ${typeStr.trim()}`);
-
-  // Get content (binary-safe via maxBuffer)
-  const { stdout: body } = await exec(
-    "git",
-    ["cat-file", type === ObjectType.COMMIT ? "commit" : typeStr.trim(), hash],
-    { ...opts, maxBuffer: 256 * 1024 * 1024, encoding: "buffer" as any },
-  );
-
-  return { type, hash, body: body as unknown as Buffer };
+  if (gitDir) {
+    // One-off for non-default repos
+    const batch = new CatFileBatch(gitDir);
+    const result = await batch.read(hash);
+    batch.close();
+    return result;
+  }
+  return getBatch().read(hash);
 }
 
 /**

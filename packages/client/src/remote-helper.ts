@@ -24,18 +24,27 @@ import {
   decodeWantFrame,
   hexToBuffer,
   bufferToHex,
-  hashObject,
   parseChildren,
   type LatencyConfig,
   wrapWithLatency,
 } from "@ws-git/protocol";
 import {
   readObject,
-  listObjects,
   resolveRef,
   writeObject,
-  updateRef,
 } from "./git-plumbing.js";
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatRate(bytes: number, elapsedMs: number): string {
+  if (elapsedMs === 0) return "-- /s";
+  return `${formatSize((bytes / elapsedMs) * 1000)}/s`;
+}
 
 const remoteName = process.argv[2];
 const remoteUrl = process.argv[3];
@@ -93,18 +102,30 @@ async function doPush(
   const refs = await remoteRefs(remoteRef);
   const remoteHash = refs[remoteRef] ?? null;
 
-  // List objects to send
-  const exclude = remoteHash ? [remoteHash] : [];
-  const objectHashes = await listObjects([localHash], exclude);
-
-  process.stderr.write(`[wsgit] pushing ${objectHashes.length} objects\n`);
+  process.stderr.write(`[wsgit] pushing ${localRef} → ${remoteRef}\n`);
 
   return new Promise((resolve, reject) => {
     let ws: WebSocket = new WebSocket(toWsUrl(remoteUrl, "push"));
     if (latency) ws = wrapWithLatency(ws, latency);
 
-    ws.on("open", async () => {
-      // Send control message
+    let sent = 0;
+    let expected = 0;
+    let rawBytes = 0;
+    let wireBytes = 0;
+    const startTime = Date.now();
+    let lastProgress = startTime;
+
+    function showProgress() {
+      const now = Date.now();
+      if (now - lastProgress >= 500) {
+        const elapsed = now - startTime;
+        const objRate = Math.round((sent / elapsed) * 1000);
+        process.stderr.write(`\r[wsgit] pushing: ${sent}/${expected} objects, ${objRate} obj/s, ${formatRate(rawBytes, elapsed)} raw, ${formatRate(wireBytes, elapsed)} wire`);
+        lastProgress = now;
+      }
+    }
+
+    ws.on("open", () => {
       const ctrl: Record<string, unknown> = {
         id: 1,
         ref: remoteRef,
@@ -113,30 +134,43 @@ async function doPush(
       if (force) ctrl.force = true;
       else if (remoteHash) ctrl.old = remoteHash;
       ws.send(JSON.stringify(ctrl));
-
-      // Stream objects
-      for (const hash of objectHashes) {
-        try {
-          const obj = await readObject(hash);
-          const frame = encodeObjectFrame(
-            obj.type,
-            hexToBuffer(obj.hash),
-            obj.body,
-          );
-          ws.send(frame);
-        } catch (err) {
-          process.stderr.write(`[wsgit] warning: could not read ${hash}\n`);
-        }
-      }
     });
 
-    ws.on("message", (data) => {
-      const msg = JSON.parse(data.toString());
-      ws.close();
-      if (msg.status === "done") {
-        resolve({ ok: true });
+    ws.on("message", async (data, isBinary) => {
+      if (isBinary) {
+        // Server is asking for objects via want frames
+        const wanted = decodeWantFrame(Buffer.from(data as ArrayBuffer));
+        expected += wanted.length;
+        const skipped: string[] = [];
+        for (const hashBuf of wanted) {
+          const hash = bufferToHex(hashBuf);
+          try {
+            const obj = await readObject(hash);
+            const frame = encodeObjectFrame(obj.type, hashBuf, obj.body);
+            ws.send(frame);
+            sent++;
+            rawBytes += obj.body.length;
+            wireBytes += frame.length;
+            showProgress();
+          } catch (err) {
+            skipped.push(hash);
+          }
+        }
+        if (skipped.length > 0) {
+          ws.send(JSON.stringify({ id: 1, skip: skipped }));
+        }
       } else {
-        resolve({ ok: false, message: msg.message });
+        // Control response — done or error
+        const msg = JSON.parse(data.toString());
+        const totalElapsed = Date.now() - startTime;
+        const ratio = rawBytes > 0 ? ((1 - wireBytes / rawBytes) * 100).toFixed(0) : "0";
+        process.stderr.write(`\r[wsgit] pushed ${sent} objects, ${formatSize(rawBytes)} -> ${formatSize(wireBytes)} (${ratio}% smaller), ${formatRate(wireBytes, totalElapsed)} wire\n`);
+        ws.close();
+        if (msg.status === "done") {
+          resolve({ ok: true });
+        } else {
+          resolve({ ok: false, message: msg.message });
+        }
       }
     });
 
@@ -163,18 +197,32 @@ async function doFetch(remoteRef: string, remoteHash: Sha1Hex): Promise<void> {
     const received = new Set<Sha1Hex>();
     const requested = new Set<Sha1Hex>();
     let objectCount = 0;
+    let totalExpected = 0;
+    let rawBytes = 0;
+    let wireBytes = 0;
     /** Objects we've requested but not yet received. */
     let outstanding = 0;
     /** Serialize async message processing to avoid races. */
     let msgQueue: Promise<void> = Promise.resolve();
+    const startTime = Date.now();
+    let lastProgress = startTime;
 
     function finish() {
+      const elapsed = Date.now() - startTime;
+      const ratio = rawBytes > 0 ? ((1 - wireBytes / rawBytes) * 100).toFixed(0) : "0";
+      process.stderr.write(`\r[wsgit] fetched ${objectCount} objects, ${formatSize(rawBytes)} -> ${formatSize(wireBytes)} (${ratio}% smaller), ${formatRate(wireBytes, elapsed)} wire\n`);
       ws.send(JSON.stringify({ id: 1, status: "done" }));
     }
 
     function checkDone() {
+      const now = Date.now();
+      if (now - lastProgress >= 500) {
+        const elapsed = now - startTime;
+        const objRate = Math.round((objectCount / elapsed) * 1000);
+        process.stderr.write(`\r[wsgit] fetching: ${objectCount}/${totalExpected} objects, ${objRate} obj/s, ${formatRate(rawBytes, elapsed)} raw, ${formatRate(wireBytes, elapsed)} wire`);
+        lastProgress = now;
+      }
       if (outstanding === 0) {
-        process.stderr.write(`[wsgit] fetched ${objectCount} objects\n`);
         finish();
       }
     }
@@ -189,6 +237,7 @@ async function doFetch(remoteRef: string, remoteHash: Sha1Hex): Promise<void> {
       }
       if (toRequest.length > 0) {
         outstanding += toRequest.length;
+        totalExpected += toRequest.length;
         ws.send(encodeWantFrame(toRequest));
       }
     }
@@ -203,11 +252,14 @@ async function doFetch(remoteRef: string, remoteHash: Sha1Hex): Promise<void> {
           const frame = decodeObjectFrame(Buffer.from(data as ArrayBuffer));
           if (!frame) return;
 
+          const rawData = data as ArrayBuffer;
           const hex = bufferToHex(frame.hash);
           if (received.has(hex)) return;
           received.add(hex);
           outstanding--;
           objectCount++;
+          rawBytes += frame.body.length;
+          wireBytes += rawData.byteLength;
 
           await writeObject(frame.type, Buffer.from(frame.body));
 

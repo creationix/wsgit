@@ -13,6 +13,12 @@ export interface ServerConfig {
   latency?: LatencyConfig;
 }
 
+let connId = 0;
+
+function log(id: number, repo: string, msg: string) {
+  console.log(`[${id}] ${repo} ${msg}`);
+}
+
 export function createServer(config: ServerConfig) {
   const objects = new ObjectStore(config.storePath);
   const refs = new RefStore(config.dbPath);
@@ -38,15 +44,18 @@ export function createServer(config: ServerConfig) {
     const mode = match[2] as "push" | "fetch";
 
     wss.handleUpgrade(req, socket, head, (ws) => {
+      const id = ++connId;
       let conn: WebSocket = ws;
       if (config.latency) {
         conn = wrapWithLatency(ws, config.latency);
       }
 
+      log(id, repo, `${mode} connected`);
+
       if (mode === "push") {
-        handlePush(conn, repo, objects, refs);
+        handlePush(id, conn, repo, objects, refs);
       } else {
-        handleFetch(conn, repo, objects, refs);
+        handleFetch(id, conn, repo, objects, refs);
       }
     });
   });
@@ -61,21 +70,53 @@ export function createServer(config: ServerConfig) {
   };
 }
 
-function handlePush(ws: WebSocket, repo: string, objects: ObjectStore, refs: RefStore) {
+function handlePush(id: number, ws: WebSocket, repo: string, objects: ObjectStore, refs: RefStore) {
   const handler = new PushHandler(ws, repo, objects, refs);
+  let objectCount = 0;
+  const startTime = Date.now();
+
+  handler.onResult = (ref, status, message) => {
+    if (status === "done") {
+      log(id, repo, `push ${ref} ok`);
+    } else {
+      log(id, repo, `push ${ref} rejected: ${message}`);
+    }
+  };
 
   ws.on("message", (data, isBinary) => {
     if (isBinary) {
-      handler.enqueue(() => handler.handleObject(Buffer.from(data as ArrayBuffer)));
+      objectCount++;
+      handler.handleObject(Buffer.from(data as ArrayBuffer));
     } else {
       const msg = JSON.parse(data.toString());
-      handler.handleControl(msg);
+      if (msg.skip) {
+        handler.handleSkip(msg.skip);
+      } else {
+        log(id, repo, `push ${msg.ref} → ${msg.new.slice(0, 8)}${msg.force ? " (force)" : ""}${msg.old ? ` (cas from ${msg.old.slice(0, 8)})` : ""}`);
+        handler.handleControl(msg);
+      }
     }
+  });
+
+  ws.on("close", () => {
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    log(id, repo, `push disconnected — ${objectCount} objects in ${elapsed}s`);
   });
 }
 
-function handleFetch(ws: WebSocket, repo: string, objects: ObjectStore, refs: RefStore) {
+function handleFetch(id: number, ws: WebSocket, repo: string, objects: ObjectStore, refs: RefStore) {
   const handler = new FetchHandler(ws, repo, objects, refs);
+  let wantCount = 0;
+  let sentCount = 0;
+  const startTime = Date.now();
+
+  const origHandleWant = handler.handleWant.bind(handler);
+  handler.handleWant = async (data: Buffer) => {
+    const hashCount = data.length / 20;
+    wantCount += hashCount;
+    await origHandleWant(data);
+    sentCount += hashCount;
+  };
 
   ws.on("message", (data, isBinary) => {
     if (isBinary) {
@@ -83,10 +124,20 @@ function handleFetch(ws: WebSocket, repo: string, objects: ObjectStore, refs: Re
     } else {
       const msg = JSON.parse(data.toString());
       if (msg.status === "done") {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        log(id, repo, `fetch done — ${sentCount} objects sent in ${elapsed}s`);
         ws.close();
       } else {
+        log(id, repo, `fetch refs ${msg.ref}`);
         handler.handleControl(msg);
       }
+    }
+  });
+
+  ws.on("close", () => {
+    if (wantCount === 0) {
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      log(id, repo, `fetch disconnected — ${elapsed}s`);
     }
   });
 }

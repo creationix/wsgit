@@ -18,6 +18,6 @@
     "build": "tsup src/index.ts --format esm --dts"
   },
   "dependencies": {
-    "fzstd": "^0.1.1"
+    "lz4-napi": "^2.9.0"
   }
 }

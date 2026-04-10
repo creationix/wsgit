@@ -13,6 +13,9 @@ export interface StoredObject {
  * Stored format: [type:1 byte][body:N bytes]
  */
 export class ObjectStore {
+  private known = new Set<Sha1Hex>();
+  private dirs = new Set<string>();
+
   constructor(private root: string) {
     fs.mkdirSync(root, { recursive: true });
   }
@@ -21,10 +24,16 @@ export class ObjectStore {
     return path.join(this.root, hash.slice(0, 2), hash.slice(2));
   }
 
-  async put(hash: Sha1Hex, type: ObjectTypeByte, body: Uint8Array): Promise<void> {
-    const p = this.objectPath(hash);
-    const dir = path.dirname(p);
+  private async ensureDir(dir: string): Promise<void> {
+    if (this.dirs.has(dir)) return;
     await fs.promises.mkdir(dir, { recursive: true });
+    this.dirs.add(dir);
+  }
+
+  async put(hash: Sha1Hex, type: ObjectTypeByte, body: Uint8Array): Promise<void> {
+    if (this.known.has(hash)) return;
+    const p = this.objectPath(hash);
+    await this.ensureDir(path.dirname(p));
     const buf = Buffer.alloc(1 + body.length);
     buf[0] = type;
     Buffer.from(body).copy(buf, 1);
@@ -32,11 +41,13 @@ export class ObjectStore {
       if ((err as NodeJS.ErrnoException).code === "EEXIST") return; // idempotent
       throw err;
     });
+    this.known.add(hash);
   }
 
   async get(hash: Sha1Hex): Promise<StoredObject | null> {
     try {
       const data = await fs.promises.readFile(this.objectPath(hash));
+      this.known.add(hash);
       return { type: data[0] as ObjectTypeByte, body: data.subarray(1) };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
@@ -45,8 +56,10 @@ export class ObjectStore {
   }
 
   async has(hash: Sha1Hex): Promise<boolean> {
+    if (this.known.has(hash)) return true;
     try {
       await fs.promises.access(this.objectPath(hash));
+      this.known.add(hash);
       return true;
     } catch {
       return false;

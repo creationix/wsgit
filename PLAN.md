@@ -267,6 +267,25 @@ RTT (latency applied half per direction on both client and server).
 
 ---
 
+## Key Invariant: Graph Completeness
+
+**If an object exists in the store, its entire reachable subgraph is also in
+the store.** This holds because a push only succeeds (ref update) when the
+expect set drains to zero — meaning every object from the target commit down
+to leaf blobs was stored or was already present.
+
+Consequences:
+- When walking children, `has(hash) = true` means stop — no need to recurse
+- A no-op push (target commit already stored) completes instantly
+- Incremental pushes only transfer genuinely new objects
+
+This invariant breaks if objects can be externally deleted or if the server
+supports lazy/partial storage (push-on-demand). At that point `has()` would
+need to mean "can be resolved" rather than "is stored locally", and the
+server would need a different trust model for graph completeness.
+
+---
+
 ## Open Questions
 
 1. **fast-export object identity** — Does `git fast-export` give us enough info

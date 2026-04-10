@@ -7,6 +7,7 @@ import {
   ObjectType,
   encodeObjectFrame,
   decodeObjectFrame,
+  decodeWantFrame,
   encodeWantFrame,
   hashObject,
   bufferToHex,
@@ -38,9 +39,43 @@ function wsUrl(endpoint: string) {
   return `ws://localhost:${port}/repos/test/repo/${endpoint}`;
 }
 
+/** Helper: push objects by responding to server want frames. */
+function pushObjects(
+  url: string,
+  ctrl: Record<string, unknown>,
+  objectMap: Map<string, { type: number; hash: Buffer; body: Buffer }>,
+): Promise<{ status: string; ref?: string; message?: string }> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+
+    ws.on("open", () => {
+      ws.send(JSON.stringify(ctrl));
+    });
+
+    ws.on("message", (data, isBinary) => {
+      if (isBinary) {
+        // Server wants objects — send them
+        const wanted = decodeWantFrame(Buffer.from(data as ArrayBuffer));
+        for (const hashBuf of wanted) {
+          const hex = bufferToHex(hashBuf);
+          const obj = objectMap.get(hex);
+          if (obj) {
+            ws.send(encodeObjectFrame(obj.type, obj.hash, obj.body));
+          }
+        }
+      } else {
+        const msg = JSON.parse(data.toString());
+        ws.close();
+        resolve(msg);
+      }
+    });
+
+    ws.on("error", reject);
+  });
+}
+
 describe("push + fetch integration", () => {
   it("pushes a blob→tree→commit and updates a ref", async () => {
-    // Create objects
     const blobBody = Buffer.from("hello wsgit\n");
     const blobHash = hashObject(ObjectType.BLOB, blobBody);
 
@@ -61,25 +96,16 @@ describe("push + fetch integration", () => {
     const commitHash = hashObject(ObjectType.COMMIT, commitBody);
     const commitHex = bufferToHex(commitHash);
 
-    // Push
-    const result = await new Promise<{ status: string; ref: string }>((resolve, reject) => {
-      const ws = new WebSocket(wsUrl("push"));
+    const objectMap = new Map([
+      [commitHex, { type: ObjectType.COMMIT, hash: commitHash, body: commitBody }],
+      [bufferToHex(treeHash), { type: ObjectType.TREE, hash: treeHash, body: treeBody }],
+      [bufferToHex(blobHash), { type: ObjectType.BLOB, hash: blobHash, body: blobBody }],
+    ]);
 
-      ws.on("open", () => {
-        ws.send(JSON.stringify({ id: 1, ref: "refs/heads/main", new: commitHex }));
-        ws.send(encodeObjectFrame(ObjectType.COMMIT, commitHash, commitBody));
-        ws.send(encodeObjectFrame(ObjectType.TREE, treeHash, treeBody));
-        ws.send(encodeObjectFrame(ObjectType.BLOB, blobHash, blobBody));
-      });
-
-      ws.on("message", (data) => {
-        const msg = JSON.parse(data.toString());
-        ws.close();
-        resolve(msg);
-      });
-
-      ws.on("error", reject);
-    });
+    const result = await pushObjects(wsUrl("push"),
+      { id: 1, ref: "refs/heads/main", new: commitHex },
+      objectMap,
+    );
 
     expect(result.status).toBe("done");
     expect(result.ref).toBe("refs/heads/main");
@@ -101,11 +127,11 @@ describe("push + fetch integration", () => {
       const ws = new WebSocket(wsUrl("push"));
 
       ws.on("open", () => {
-        // Send object without any control message
         ws.send(encodeObjectFrame(ObjectType.BLOB, blobHash, blobBody));
       });
 
-      ws.on("message", (data) => {
+      ws.on("message", (data, isBinary) => {
+        if (isBinary) return; // ignore want frames
         const msg = JSON.parse(data.toString());
         ws.close();
         resolve(msg);
@@ -129,17 +155,15 @@ describe("push + fetch integration", () => {
     const commit1Hash = hashObject(ObjectType.COMMIT, commit1Body);
     const commit1Hex = bufferToHex(commit1Hash);
 
-    await new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(wsUrl("push"));
-      ws.on("open", () => {
-        ws.send(JSON.stringify({ id: 1, ref: "refs/heads/main", new: commit1Hex }));
-        ws.send(encodeObjectFrame(ObjectType.COMMIT, commit1Hash, commit1Body));
-        ws.send(encodeObjectFrame(ObjectType.TREE, tree1Hash, tree1));
-        ws.send(encodeObjectFrame(ObjectType.BLOB, blob1Hash, blob1));
-      });
-      ws.on("message", () => { ws.close(); resolve(); });
-      ws.on("error", reject);
-    });
+    const objects1 = new Map([
+      [commit1Hex, { type: ObjectType.COMMIT, hash: commit1Hash, body: commit1Body }],
+      [bufferToHex(tree1Hash), { type: ObjectType.TREE, hash: tree1Hash, body: tree1 }],
+      [bufferToHex(blob1Hash), { type: ObjectType.BLOB, hash: blob1Hash, body: blob1 }],
+    ]);
+    await pushObjects(wsUrl("push"),
+      { id: 1, ref: "refs/heads/main", new: commit1Hex },
+      objects1,
+    );
 
     // Push unrelated commit (not a descendant of commit1) — should be rejected
     const blob2 = Buffer.from("v2");
@@ -151,20 +175,15 @@ describe("push + fetch integration", () => {
     const commit2Hash = hashObject(ObjectType.COMMIT, commit2Body);
     const commit2Hex = bufferToHex(commit2Hash);
 
-    const result = await new Promise<{ status: string; message?: string }>((resolve, reject) => {
-      const ws = new WebSocket(wsUrl("push"));
-      ws.on("open", () => {
-        ws.send(JSON.stringify({ id: 1, ref: "refs/heads/main", new: commit2Hex }));
-        ws.send(encodeObjectFrame(ObjectType.COMMIT, commit2Hash, commit2Body));
-        ws.send(encodeObjectFrame(ObjectType.TREE, tree2Hash, tree2));
-        ws.send(encodeObjectFrame(ObjectType.BLOB, blob2Hash, blob2));
-      });
-      ws.on("message", (data) => {
-        ws.close();
-        resolve(JSON.parse(data.toString()));
-      });
-      ws.on("error", reject);
-    });
+    const objects2 = new Map([
+      [commit2Hex, { type: ObjectType.COMMIT, hash: commit2Hash, body: commit2Body }],
+      [bufferToHex(tree2Hash), { type: ObjectType.TREE, hash: tree2Hash, body: tree2 }],
+      [bufferToHex(blob2Hash), { type: ObjectType.BLOB, hash: blob2Hash, body: blob2 }],
+    ]);
+    const result = await pushObjects(wsUrl("push"),
+      { id: 1, ref: "refs/heads/main", new: commit2Hex },
+      objects2,
+    );
 
     expect(result.status).toBe("error");
     expect(result.message).toBe("non-fast-forward");
@@ -179,26 +198,21 @@ describe("push + fetch integration", () => {
     const commit3Hash = hashObject(ObjectType.COMMIT, commit3Body);
     const commit3Hex = bufferToHex(commit3Hash);
 
-    const result2 = await new Promise<{ status: string }>((resolve, reject) => {
-      const ws = new WebSocket(wsUrl("push"));
-      ws.on("open", () => {
-        ws.send(JSON.stringify({ id: 1, ref: "refs/heads/main", new: commit3Hex }));
-        ws.send(encodeObjectFrame(ObjectType.COMMIT, commit3Hash, commit3Body));
-        ws.send(encodeObjectFrame(ObjectType.TREE, tree3Hash, tree3));
-        ws.send(encodeObjectFrame(ObjectType.BLOB, blob3Hash, blob3));
-      });
-      ws.on("message", (data) => {
-        ws.close();
-        resolve(JSON.parse(data.toString()));
-      });
-      ws.on("error", reject);
-    });
+    const objects3 = new Map([
+      [commit3Hex, { type: ObjectType.COMMIT, hash: commit3Hash, body: commit3Body }],
+      [bufferToHex(tree3Hash), { type: ObjectType.TREE, hash: tree3Hash, body: tree3 }],
+      [bufferToHex(blob3Hash), { type: ObjectType.BLOB, hash: blob3Hash, body: blob3 }],
+    ]);
+    const result2 = await pushObjects(wsUrl("push"),
+      { id: 1, ref: "refs/heads/main", new: commit3Hex },
+      objects3,
+    );
 
     expect(result2.status).toBe("done");
   });
 
   it("fetches objects after push", async () => {
-    // First push a blob→tree→commit
+    // First push
     const blobBody = Buffer.from("fetch me\n");
     const blobHash = hashObject(ObjectType.BLOB, blobBody);
 
@@ -219,24 +233,17 @@ describe("push + fetch integration", () => {
     const commitHash = hashObject(ObjectType.COMMIT, commitBody);
     const commitHex = bufferToHex(commitHash);
 
-    // Push
-    await new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(wsUrl("push"));
-      ws.on("open", () => {
-        ws.send(JSON.stringify({ id: 1, ref: "refs/heads/main", new: commitHex }));
-        ws.send(encodeObjectFrame(ObjectType.COMMIT, commitHash, commitBody));
-        ws.send(encodeObjectFrame(ObjectType.TREE, treeHash, treeBody));
-        ws.send(encodeObjectFrame(ObjectType.BLOB, blobHash, blobBody));
-      });
-      ws.on("message", (data) => {
-        const msg = JSON.parse(data.toString());
-        if (msg.status === "done") { ws.close(); resolve(); }
-        else { ws.close(); reject(new Error(msg.message)); }
-      });
-      ws.on("error", reject);
-    });
+    const objectMap = new Map([
+      [commitHex, { type: ObjectType.COMMIT, hash: commitHash, body: commitBody }],
+      [bufferToHex(treeHash), { type: ObjectType.TREE, hash: treeHash, body: treeBody }],
+      [bufferToHex(blobHash), { type: ObjectType.BLOB, hash: blobHash, body: blobBody }],
+    ]);
+    await pushObjects(wsUrl("push"),
+      { id: 1, ref: "refs/heads/main", new: commitHex },
+      objectMap,
+    );
 
-    // Now fetch — list refs, then request objects
+    // Now fetch
     const fetched = await new Promise<{
       refs: Record<string, string>;
       objects: { type: number; hash: string; body: string }[];
@@ -244,7 +251,6 @@ describe("push + fetch integration", () => {
       const ws = new WebSocket(wsUrl("fetch"));
       const objects: { type: number; hash: string; body: string }[] = [];
       let refs: Record<string, string> = {};
-      let wantsSent = 0;
 
       ws.on("open", () => {
         ws.send(JSON.stringify({ id: 1, ref: "refs/heads/" }));
@@ -262,15 +268,12 @@ describe("push + fetch integration", () => {
 
             // Walk the graph: request children we haven't seen yet
             if (frame.type === ObjectType.COMMIT) {
-              // Parse tree hash from commit
               const text = Buffer.from(frame.body).toString();
               const treeMatch = text.match(/^tree ([0-9a-f]{40})/m);
               if (treeMatch) {
                 ws.send(encodeWantFrame([hexToBuffer(treeMatch[1])]));
-                wantsSent++;
               }
             } else if (frame.type === ObjectType.TREE) {
-              // Parse entry hashes from tree
               const buf = Buffer.from(frame.body);
               let i = 0;
               const childHashes: Buffer[] = [];
@@ -282,11 +285,9 @@ describe("push + fetch integration", () => {
               }
               if (childHashes.length > 0) {
                 ws.send(encodeWantFrame(childHashes));
-                wantsSent++;
               }
             }
 
-            // After we have all 3 objects (commit + tree + blob), close
             if (objects.length === 3) {
               ws.send(JSON.stringify({ id: 1, status: "done" }));
             }
@@ -295,10 +296,8 @@ describe("push + fetch integration", () => {
           const msg = JSON.parse(data.toString());
           if (msg.status === "refs") {
             refs = msg.refs;
-            // Request the commit
-            const commitHash = Object.values(refs)[0] as string;
-            ws.send(encodeWantFrame([hexToBuffer(commitHash)]));
-            wantsSent++;
+            const hash = Object.values(refs)[0] as string;
+            ws.send(encodeWantFrame([hexToBuffer(hash)]));
           }
         }
       });

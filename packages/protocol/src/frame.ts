@@ -1,9 +1,9 @@
-import { gzipSync, gunzipSync } from "node:zlib";
+import { compressSync, uncompressSync } from "lz4-napi";
 import { type ObjectTypeByte, type Sha1Hex, HASH_BYTES } from "./types.js";
 
 /**
  * Binary frame layout:
- *   [type: 1 byte][sha1: 20 bytes][zstd-compressed body]
+ *   [type: 1 byte][sha1: 20 bytes][lz4-compressed body]
  *
  * Want frame layout:
  *   [sha1: 20 bytes]×N (concatenated hashes, no type byte)
@@ -15,7 +15,7 @@ export function encodeObjectFrame(
   hash: Buffer,
   body: Uint8Array,
 ): Buffer {
-  const compressed = gzipSync(body);
+  const compressed = compressSync(Buffer.from(body));
   const frame = Buffer.alloc(1 + HASH_BYTES + compressed.length);
   frame[0] = type;
   hash.copy(frame, 1);
@@ -29,11 +29,12 @@ export function decodeObjectFrame(data: Buffer): {
   hash: Buffer;
   body: Uint8Array;
 } | null {
-  if (data.length < 1 + HASH_BYTES + 1) return null;
+  if (data.length < 1 + HASH_BYTES) return null;
   const type = data[0] as ObjectTypeByte;
   const hash = data.subarray(1, 1 + HASH_BYTES);
   const compressed = data.subarray(1 + HASH_BYTES);
-  const body = gunzipSync(compressed);
+  if (compressed.length === 0) return { type, hash: Buffer.from(hash), body: compressed };
+  const body = uncompressSync(compressed);
   return { type, hash: Buffer.from(hash), body };
 }
 
