@@ -1,0 +1,33 @@
+{
+  "name": "@ws-git/server",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "wsgit-server": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/cli.ts src/index.ts --format esm --dts",
+    "dev": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@ws-git/protocol": "*",
+    "ws": "^8.18.0",
+    "better-sqlite3": "^11.7.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.0",
+    "@types/better-sqlite3": "^7.6.0",
+    "tsx": "^4.19.0"
+  }
+}

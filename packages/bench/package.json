@@ -1,0 +1,17 @@
+{
+  "name": "@ws-git/bench",
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "build": "tsup src/run.ts --format esm",
+    "bench": "tsx src/run.ts"
+  },
+  "dependencies": {
+    "@ws-git/protocol": "*",
+    "@ws-git/server": "*",
+    "@ws-git/client": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "@ws-git/client",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "git-remote-wsgit": "dist/remote-helper.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/remote-helper.ts src/index.ts --format esm --dts",
+    "dev": "tsx src/remote-helper.ts"
+  },
+  "dependencies": {
+    "@ws-git/protocol": "*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.19.0"
+  }
+}
