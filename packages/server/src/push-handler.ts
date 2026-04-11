@@ -4,7 +4,8 @@ import {
   type PushRequest,
   type ObjectTypeByte,
   ObjectType,
-  decodeObjectFrame,
+  decodeObjectFrameRaw,
+  decompressBody,
   encodeWantFrame,
   hexToBuffer,
   bufferToHex,
@@ -44,7 +45,8 @@ async function isAncestor(
 
     const obj = await store.get(hash);
     if (!obj || obj.type !== ObjectType.COMMIT) continue;
-    for (const parent of parseCommitParents(obj.body)) {
+    const body = decompressBody(obj.compressedBody);
+    for (const parent of parseCommitParents(body)) {
       if (!visited.has(parent)) queue.push(parent);
     }
   }
@@ -65,7 +67,6 @@ export class PushHandler {
 
   constructor(
     private ws: WebSocket,
-    private repo: string,
     private objects: ObjectStore,
     private refs: RefStore,
   ) { }
@@ -109,13 +110,13 @@ export class PushHandler {
   }
 
   async handleObject(data: Buffer): Promise<void> {
-    const frame = decodeObjectFrame(data);
+    const frame = decodeObjectFrameRaw(data);
     if (!frame) {
       this.sendError(0, "invalid object frame");
       return;
     }
 
-    const { type, hash, body } = frame;
+    const { type, hash, body, compressedBody } = frame;
     const hexHash = bufferToHex(hash);
 
     // Find which stream(s) expect this hash
@@ -133,14 +134,10 @@ export class PushHandler {
       return;
     }
 
-    // Hash verification is skipped — the client reads objects via
-    // git cat-file which guarantees content↔hash integrity, and
-    // WebSocket provides wire-level integrity checks.
+    // Store compressed — skip decompression on disk
+    await this.objects.put(hexHash, type, compressedBody);
 
-    // Store the object
-    await this.objects.put(hexHash, type, body);
-
-    // Parse children and check which are missing (in parallel)
+    // Parse children from decompressed body
     const children = parseChildren(type, body);
     const missing: Sha1Hex[] = [];
     if (children.length > 0) {
@@ -187,22 +184,22 @@ export class PushHandler {
 
     if (force) {
       // Force push — unconditional set
-      this.refs.set(this.repo, ref, newHash);
+      this.refs.set(ref, newHash);
       this.sendDone(id, ref, newHash);
     } else if (oldHash !== undefined) {
       // Force-with-lease — compare-and-swap
-      if (this.refs.cas(this.repo, ref, oldHash, newHash)) {
+      if (this.refs.cas(ref, oldHash, newHash)) {
         this.sendDone(id, ref, newHash);
       } else {
-        const actual = this.refs.get(this.repo, ref);
+        const actual = this.refs.get(ref);
         this.sendError(id, "ref conflict", { expected: oldHash, actual });
       }
     } else {
       // Normal push — check fast-forward then CAS
-      const currentHash = this.refs.get(this.repo, ref);
+      const currentHash = this.refs.get(ref);
       if (currentHash === null) {
         // New ref
-        if (this.refs.cas(this.repo, ref, null, newHash)) {
+        if (this.refs.cas(ref, null, newHash)) {
           this.sendDone(id, ref, newHash);
         } else {
           this.sendError(id, "ref conflict");
@@ -212,7 +209,7 @@ export class PushHandler {
         const ff = await isAncestor(this.objects, newHash, currentHash);
         if (!ff) {
           this.sendError(id, "non-fast-forward", { current: currentHash });
-        } else if (this.refs.cas(this.repo, ref, currentHash, newHash)) {
+        } else if (this.refs.cas(ref, currentHash, newHash)) {
           this.sendDone(id, ref, newHash);
         } else {
           this.sendError(id, "ref conflict", { current: currentHash });

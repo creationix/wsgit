@@ -1,4 +1,5 @@
 import http from "node:http";
+import path from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import { type LatencyConfig, wrapWithLatency } from "@ws-git/protocol";
 import { ObjectStore } from "./object-store.js";
@@ -10,8 +11,6 @@ import { FetchHandler } from "./fetch-handler.js";
 export interface ServerConfig {
   port: number;
   storePath: string;
-  dbPath: string;
-  lfsPath?: string;
   latency?: LatencyConfig;
 }
 
@@ -22,12 +21,46 @@ function log(id: number, repo: string, msg: string) {
 }
 
 export function createServer(config: ServerConfig) {
-  const objects = new ObjectStore(config.storePath);
-  const refs = new RefStore(config.dbPath);
-  const lfs = new LfsStore(config.lfsPath ?? config.storePath.replace(/objects$/, "lfs"));
+  const storeRoot = config.storePath;
+
+  // Per-repo stores, created lazily
+  const objectStores = new Map<string, ObjectStore>();
+  const lfsStores = new Map<string, LfsStore>();
+  const refStores = new Map<string, RefStore>();
+
+  function repoDir(repo: string): string {
+    return path.join(storeRoot, repo);
+  }
+
+  function getObjects(repo: string): ObjectStore {
+    let store = objectStores.get(repo);
+    if (!store) {
+      store = new ObjectStore(path.join(repoDir(repo), "objects"));
+      objectStores.set(repo, store);
+    }
+    return store;
+  }
+
+  function getLfs(repo: string): LfsStore {
+    let store = lfsStores.get(repo);
+    if (!store) {
+      store = new LfsStore(path.join(repoDir(repo), "lfs"));
+      lfsStores.set(repo, store);
+    }
+    return store;
+  }
+
+  function getRefs(repo: string): RefStore {
+    let store = refStores.get(repo);
+    if (!store) {
+      store = new RefStore(path.join(repoDir(repo), "refs.db"));
+      refStores.set(repo, store);
+    }
+    return store;
+  }
 
   const httpServer = http.createServer((req, res) => {
-    handleHttp(req, res, config, lfs);
+    handleHttp(req, res, config, getLfs);
   });
 
   const wss = new WebSocketServer({ noServer: true });
@@ -55,9 +88,9 @@ export function createServer(config: ServerConfig) {
       log(id, repo, `${mode} connected`);
 
       if (mode === "push") {
-        handlePush(id, conn, repo, objects, refs);
+        handlePush(id, conn, repo, getObjects(repo), getRefs(repo));
       } else {
-        handleFetch(id, conn, repo, objects, refs);
+        handleFetch(id, conn, repo, getObjects(repo), getRefs(repo));
       }
     });
   });
@@ -66,14 +99,14 @@ export function createServer(config: ServerConfig) {
     listen: (cb?: () => void) => httpServer.listen(config.port, cb),
     close: () => {
       httpServer.close();
-      refs.close();
+      for (const store of refStores.values()) store.close();
     },
     httpServer,
   };
 }
 
 function handlePush(id: number, ws: WebSocket, repo: string, objects: ObjectStore, refs: RefStore) {
-  const handler = new PushHandler(ws, repo, objects, refs);
+  const handler = new PushHandler(ws, objects, refs);
   let objectCount = 0;
   const startTime = Date.now();
 
@@ -121,10 +154,11 @@ async function handleHttp(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   config: ServerConfig,
-  lfs: LfsStore,
+  getLfs: (repo: string) => LfsStore,
 ) {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const method = req.method ?? "GET";
+  console.log(`[http] ${method} ${url.pathname}`);
 
   // POST /repos/:owner/:repo/info/lfs/objects/batch
   const batchMatch = url.pathname.match(
@@ -133,7 +167,7 @@ async function handleHttp(
   if (batchMatch && method === "POST") {
     const repo = batchMatch[1];
     const body = JSON.parse((await readBody(req)).toString());
-    await handleLfsBatch(req, res, config, repo, lfs, body);
+    await handleLfsBatch(req, res, config, repo, getLfs(repo), body);
     return;
   }
 
@@ -143,12 +177,12 @@ async function handleHttp(
   );
   if (objMatch && method === "PUT") {
     const [, repo, oid] = objMatch;
-    await handleLfsUpload(req, res, repo, lfs, oid);
+    await handleLfsUpload(req, res, repo, getLfs(repo), oid);
     return;
   }
   if (objMatch && method === "GET") {
     const [, repo, oid] = objMatch;
-    await handleLfsDownload(res, repo, lfs, oid);
+    await handleLfsDownload(res, repo, getLfs(repo), oid);
     return;
   }
 
@@ -262,7 +296,7 @@ async function handleLfsDownload(
 // --- WebSocket handlers ---
 
 function handleFetch(id: number, ws: WebSocket, repo: string, objects: ObjectStore, refs: RefStore) {
-  const handler = new FetchHandler(ws, repo, objects, refs);
+  const handler = new FetchHandler(ws, objects, refs);
   let wantCount = 0;
   let sentCount = 0;
   const startTime = Date.now();

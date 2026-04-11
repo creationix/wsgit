@@ -19,8 +19,7 @@ beforeEach(async () => {
 
   server = createServer({
     port,
-    storePath: path.join(tmpDir, "server-store", "objects"),
-    dbPath: path.join(tmpDir, "server-store", "refs.db"),
+    storePath: path.join(tmpDir, "server-store"),
   });
   await new Promise<void>((resolve) => server.listen(resolve));
 

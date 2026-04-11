@@ -10,15 +10,13 @@ function flag(name: string, fallback: string): string {
 }
 
 const port = parseInt(flag("port", "9418"), 10);
-const storePath = flag("store", path.join(process.cwd(), ".wsgit-store", "objects"));
-const dbPath = flag("db", path.join(process.cwd(), ".wsgit-store", "refs.db"));
+const storePath = flag("store", path.join(process.cwd(), ".wsgit-store"));
 const latencyMs = parseInt(flag("latency-ms", "0"), 10);
 const jitterMs = parseInt(flag("jitter-ms", "0"), 10);
 
 const server = createServer({
   port,
   storePath,
-  dbPath,
   latency: latencyMs > 0 ? { latencyMs, jitterMs } : undefined,
 });
 
@@ -28,7 +26,6 @@ server.listen(() => {
     console.log(`  latency: ${latencyMs}ms ±${jitterMs}ms per direction`);
   }
   console.log(`  store: ${storePath}`);
-  console.log(`  refs:  ${dbPath}`);
 });
 
 process.on("SIGINT", () => {

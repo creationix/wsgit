@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.tsbuildinfo
 .wsgit-store/
+*.log
+bench-results.csv

@@ -8,6 +8,7 @@ import {
   encodeObjectFrame,
   decodeObjectFrame,
   decodeWantFrame,
+  decompressBody,
   encodeWantFrame,
   hashObject,
   bufferToHex,
@@ -24,8 +25,7 @@ beforeEach(async () => {
   port = 19418 + Math.floor(Math.random() * 10000);
   server = createServer({
     port,
-    storePath: path.join(tmpDir, "objects"),
-    dbPath: path.join(tmpDir, "refs.db"),
+    storePath: tmpDir,
   });
   await new Promise<void>((resolve) => server.listen(resolve));
 });
@@ -110,12 +110,14 @@ describe("push + fetch integration", () => {
     expect(result.status).toBe("done");
     expect(result.ref).toBe("refs/heads/main");
 
-    // Verify objects are stored (format: [type:1][body:N])
+    // Verify objects are stored (format: [type:1][lz4-compressed body:N])
+    const blobHex = bufferToHex(blobHash);
     const storedBlob = await fs.promises.readFile(
-      path.join(tmpDir, "objects", bufferToHex(blobHash).slice(0, 2), bufferToHex(blobHash).slice(2)),
+      path.join(tmpDir, "test/repo", "objects", blobHex),
     );
     expect(storedBlob[0]).toBe(ObjectType.BLOB);
-    expect(storedBlob.subarray(1).toString()).toBe("hello wsgit\n");
+    const decompressed = decompressBody(storedBlob.subarray(1));
+    expect(decompressed.toString()).toBe("hello wsgit\n");
   });
 
   it("rejects unexpected objects", async () => {

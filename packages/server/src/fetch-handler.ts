@@ -1,7 +1,7 @@
 import type { WebSocket } from "ws";
 import {
   type FetchRequest,
-  encodeObjectFrame,
+  encodeObjectFrameRaw,
   decodeWantFrame,
 } from "@ws-git/protocol";
 import type { ObjectStore } from "./object-store.js";
@@ -19,13 +19,12 @@ import type { RefStore } from "./ref-store.js";
 export class FetchHandler {
   constructor(
     private ws: WebSocket,
-    private repo: string,
     private objects: ObjectStore,
     private refs: RefStore,
   ) { }
 
   handleControl(msg: FetchRequest): void {
-    const refs = this.refs.list(this.repo, msg.ref);
+    const refs = this.refs.list(msg.ref);
     this.ws.send(JSON.stringify({
       id: msg.id,
       status: "refs",
@@ -40,7 +39,7 @@ export class FetchHandler {
       const stored = await this.objects.get(hex);
       if (!stored) continue;
 
-      const frame = encodeObjectFrame(stored.type, hashBuf, stored.body);
+      const frame = encodeObjectFrameRaw(stored.type, hashBuf, stored.compressedBody);
       this.ws.send(frame);
     }
   }

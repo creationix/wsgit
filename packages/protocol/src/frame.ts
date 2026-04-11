@@ -23,7 +23,7 @@ export function encodeObjectFrame(
   return frame;
 }
 
-/** Decode a binary object frame. Returns null if too short. */
+/** Decode a binary object frame, decompressing the body. Returns null if too short. */
 export function decodeObjectFrame(data: Buffer): {
   type: ObjectTypeByte;
   hash: Buffer;
@@ -36,6 +36,35 @@ export function decodeObjectFrame(data: Buffer): {
   if (compressed.length === 0) return { type, hash: Buffer.from(hash), body: compressed };
   const body = uncompressSync(compressed);
   return { type, hash: Buffer.from(hash), body };
+}
+
+/** Decode a binary object frame, returning both compressed and decompressed body. */
+export function decodeObjectFrameRaw(data: Buffer): {
+  type: ObjectTypeByte;
+  hash: Buffer;
+  body: Uint8Array;
+  compressedBody: Uint8Array;
+} | null {
+  if (data.length < 1 + HASH_BYTES) return null;
+  const type = data[0] as ObjectTypeByte;
+  const hash = data.subarray(1, 1 + HASH_BYTES);
+  const compressedBody = Buffer.from(data.subarray(1 + HASH_BYTES));
+  if (compressedBody.length === 0) return { type, hash: Buffer.from(hash), body: compressedBody, compressedBody };
+  const body = uncompressSync(compressedBody);
+  return { type, hash: Buffer.from(hash), body, compressedBody };
+}
+
+/** Encode a pre-compressed object frame (type + hash + already-compressed body). */
+export function encodeObjectFrameRaw(
+  type: ObjectTypeByte,
+  hash: Buffer,
+  compressedBody: Uint8Array,
+): Buffer {
+  const frame = Buffer.alloc(1 + HASH_BYTES + compressedBody.length);
+  frame[0] = type;
+  hash.copy(frame, 1);
+  Buffer.from(compressedBody).copy(frame, 1 + HASH_BYTES);
+  return frame;
 }
 
 /** Encode one or more SHA-1 hashes into a want frame. */
@@ -69,6 +98,12 @@ export function decodeWantFrame(data: Buffer): Buffer[] {
  * For the fetch endpoint, server receives wants and the client doesn't send objects.
  * So disambiguation is context-dependent — callers know which endpoint they're on.
  */
+
+/** Decompress an lz4-compressed buffer. */
+export function decompressBody(compressed: Uint8Array): Uint8Array {
+  if (compressed.length === 0) return compressed;
+  return uncompressSync(Buffer.from(compressed));
+}
 
 // --- Hex helpers ---
 

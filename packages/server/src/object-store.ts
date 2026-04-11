@@ -4,41 +4,39 @@ import type { Sha1Hex, ObjectTypeByte } from "@ws-git/protocol";
 
 export interface StoredObject {
   type: ObjectTypeByte;
-  body: Uint8Array;
+  /** lz4-compressed body */
+  compressedBody: Uint8Array;
 }
 
 /**
  * Content-addressable filesystem object store.
- * Layout: <root>/<hex[0:2]>/<hex[2:]>
- * Stored format: [type:1 byte][body:N bytes]
+ * Layout: <root>/<full hex hash>
+ * Stored format: [type:1 byte][lz4-compressed body:N bytes]
+ *
+ * Objects are stored in their wire-compressed form to avoid
+ * decompressing on ingest and recompressing on fetch.
+ * Flat layout — modern filesystems handle large directories fine,
+ * and this maps directly to S3/blob storage keys.
  */
 export class ObjectStore {
   private known = new Set<Sha1Hex>();
-  private dirs = new Set<string>();
 
   constructor(private root: string) {
     fs.mkdirSync(root, { recursive: true });
   }
 
   private objectPath(hash: Sha1Hex): string {
-    return path.join(this.root, hash.slice(0, 2), hash.slice(2));
+    return path.join(this.root, hash);
   }
 
-  private async ensureDir(dir: string): Promise<void> {
-    if (this.dirs.has(dir)) return;
-    await fs.promises.mkdir(dir, { recursive: true });
-    this.dirs.add(dir);
-  }
-
-  async put(hash: Sha1Hex, type: ObjectTypeByte, body: Uint8Array): Promise<void> {
+  async put(hash: Sha1Hex, type: ObjectTypeByte, compressedBody: Uint8Array): Promise<void> {
     if (this.known.has(hash)) return;
     const p = this.objectPath(hash);
-    await this.ensureDir(path.dirname(p));
-    const buf = Buffer.alloc(1 + body.length);
+    const buf = Buffer.alloc(1 + compressedBody.length);
     buf[0] = type;
-    Buffer.from(body).copy(buf, 1);
+    Buffer.from(compressedBody).copy(buf, 1);
     await fs.promises.writeFile(p, buf, { flag: "wx" }).catch((err) => {
-      if ((err as NodeJS.ErrnoException).code === "EEXIST") return; // idempotent
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") return;
       throw err;
     });
     this.known.add(hash);
@@ -48,7 +46,7 @@ export class ObjectStore {
     try {
       const data = await fs.promises.readFile(this.objectPath(hash));
       this.known.add(hash);
-      return { type: data[0] as ObjectTypeByte, body: data.subarray(1) };
+      return { type: data[0] as ObjectTypeByte, compressedBody: data.subarray(1) };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw err;
