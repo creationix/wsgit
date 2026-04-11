@@ -6,3 +6,5 @@ dist/
 bench-results.csv
 .next/
 .next/
+.vercel
+yarn.lock
