@@ -4,3 +4,5 @@ dist/
 .wsgit-store/
 *.log
 bench-results.csv
+.next/
+.next/
