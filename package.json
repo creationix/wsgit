@@ -4,6 +4,10 @@
   "workspaces": [
     "packages/*"
   ],
+  "bin": {
+    "git-remote-wsgit": "packages/client/dist/remote-helper.js",
+    "wsgit-server": "packages/server/dist/cli.js"
+  },
   "scripts": {
     "build": "npm run build --workspaces",
     "test": "vitest run",

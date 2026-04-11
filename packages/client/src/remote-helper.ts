@@ -9,7 +9,7 @@
  * objects directly, matching the per-object WebSocket protocol.
  */
 import readline from "node:readline";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { WebSocket } from "ws";
 
@@ -62,6 +62,22 @@ function toWsUrl(wsgitUrl: string, endpoint: string): string {
   const parsed = new URL(wsgitUrl.replace("wsgit://", "http://"));
   const wsScheme = parsed.protocol === "https:" ? "wss:" : "ws:";
   return `${wsScheme}//${parsed.host}/repos${parsed.pathname}/${endpoint}`;
+}
+
+function toLfsUrl(wsgitUrl: string): string {
+  const parsed = new URL(wsgitUrl.replace("wsgit://", "http://"));
+  const httpScheme = parsed.protocol === "https:" ? "https:" : "http:";
+  return `${httpScheme}//${parsed.host}/repos${parsed.pathname}/info/lfs`;
+}
+
+// Configure LFS endpoint for this remote so git-lfs talks to our server
+if (remoteName) {
+  const lfsUrl = toLfsUrl(remoteUrl);
+  try {
+    execFileSync("git", ["config", `remote.${remoteName}.lfsurl`, lfsUrl]);
+  } catch {
+    // Non-fatal — LFS may not be installed
+  }
 }
 
 /** Query remote refs via the fetch endpoint. */
