@@ -2,6 +2,7 @@ import { upgradeWebSocket, type WebSocketData } from "@vercel/functions";
 import { NextRequest, NextResponse } from "next/server";
 import path from "node:path";
 import { S3Client } from "@aws-sdk/client-s3";
+import { awsCredentialsProvider } from "@vercel/oidc-aws-credentials-provider";
 import {
   ObjectStore,
   RefStore,
@@ -17,7 +18,12 @@ const useS3 = !!process.env.WSGIT_S3_BUCKET;
 const STORE_ROOT = process.env.WSGIT_STORE ?? "/tmp/wsgit-store";
 const S3_BUCKET = process.env.WSGIT_S3_BUCKET ?? "";
 
-const s3 = useS3 ? new S3Client({}) : null;
+const s3 = useS3 ? new S3Client({
+  region: process.env.AWS_REGION ?? "us-east-1",
+  ...(process.env.AWS_ROLE_ARN
+    ? { credentials: awsCredentialsProvider({ roleArn: process.env.AWS_ROLE_ARN }) }
+    : {}),
+}) : null;
 
 // Per-repo stores, lazily created
 const objectStores = new Map<string, any>();
