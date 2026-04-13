@@ -58,15 +58,20 @@ const latencyMs = parseInt(process.env.GIT_WSGIT_LATENCY_MS ?? "0", 10);
 const latency: LatencyConfig | undefined =
   latencyMs > 0 ? { latencyMs: latencyMs / 2 } : undefined;
 
+function isLocalhost(host: string): boolean {
+  const h = host.split(":")[0];
+  return h === "localhost" || h === "127.0.0.1" || h === "::1";
+}
+
 function toWsUrl(wsgitUrl: string, endpoint: string): string {
   const parsed = new URL(wsgitUrl.replace("wsgit://", "http://"));
-  const wsScheme = parsed.protocol === "https:" ? "wss:" : "ws:";
+  const wsScheme = isLocalhost(parsed.host) ? "ws:" : "wss:";
   return `${wsScheme}//${parsed.host}/repos${parsed.pathname}/${endpoint}`;
 }
 
 function toLfsUrl(wsgitUrl: string): string {
   const parsed = new URL(wsgitUrl.replace("wsgit://", "http://"));
-  const httpScheme = parsed.protocol === "https:" ? "https:" : "http:";
+  const httpScheme = isLocalhost(parsed.host) ? "http:" : "https:";
   return `${httpScheme}//${parsed.host}/repos${parsed.pathname}/info/lfs`;
 }
 
