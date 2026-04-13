@@ -1,8 +1,6 @@
 import { upgradeWebSocket, type WebSocketData } from "@vercel/functions";
 import { NextRequest, NextResponse } from "next/server";
 import path from "node:path";
-import { S3Client } from "@aws-sdk/client-s3";
-import { awsCredentialsProvider } from "@vercel/oidc-aws-credentials-provider";
 import {
   ObjectStore,
   RefStore,
@@ -10,20 +8,12 @@ import {
   PushHandler,
   FetchHandler,
 } from "@ws-git/server";
-import { S3ObjectStore } from "../../../lib/s3-object-store";
-import { S3RefStore } from "../../../lib/s3-ref-store";
-import { S3LfsStore } from "../../../lib/s3-lfs-store";
+import { BlobObjectStore } from "../../../lib/blob-object-store";
+import { BlobRefStore } from "../../../lib/blob-ref-store";
+import { BlobLfsStore } from "../../../lib/blob-lfs-store";
 
-const useS3 = !!process.env.WSGIT_S3_BUCKET;
+const useBlob = !!process.env.BLOB_READ_WRITE_TOKEN;
 const STORE_ROOT = process.env.WSGIT_STORE ?? "/tmp/wsgit-store";
-const S3_BUCKET = process.env.WSGIT_S3_BUCKET ?? "";
-
-const s3 = useS3 ? new S3Client({
-  region: process.env.AWS_REGION ?? "us-east-1",
-  ...(process.env.AWS_ROLE_ARN
-    ? { credentials: awsCredentialsProvider({ roleArn: process.env.AWS_ROLE_ARN }) }
-    : {}),
-}) : null;
 
 // Per-repo stores, lazily created
 const objectStores = new Map<string, any>();
@@ -33,8 +23,8 @@ const lfsStores = new Map<string, any>();
 function getObjects(repo: string) {
   let store = objectStores.get(repo);
   if (!store) {
-    store = useS3
-      ? new S3ObjectStore(s3!, S3_BUCKET, repo)
+    store = useBlob
+      ? new BlobObjectStore(repo)
       : new ObjectStore(path.join(STORE_ROOT, repo, "objects"));
     objectStores.set(repo, store);
   }
@@ -44,8 +34,8 @@ function getObjects(repo: string) {
 function getRefs(repo: string) {
   let store = refStores.get(repo);
   if (!store) {
-    store = useS3
-      ? new S3RefStore(s3!, S3_BUCKET, repo)
+    store = useBlob
+      ? new BlobRefStore(repo)
       : new RefStore(path.join(STORE_ROOT, repo, "refs.db"));
     refStores.set(repo, store);
   }
@@ -55,8 +45,8 @@ function getRefs(repo: string) {
 function getLfs(repo: string) {
   let store = lfsStores.get(repo);
   if (!store) {
-    store = useS3
-      ? new S3LfsStore(s3!, S3_BUCKET, repo)
+    store = useBlob
+      ? new BlobLfsStore(repo)
       : new LfsStore(path.join(STORE_ROOT, repo, "lfs"));
     lfsStores.set(repo, store);
   }
@@ -194,30 +184,28 @@ async function handleLfsBatch(req: NextRequest, repo: string, body: any) {
     requested.map(async (obj: { oid: string; size: number }) => {
       const exists = await lfs.has(obj.oid);
 
+      const baseUrl = `${req.headers.get("x-forwarded-proto") ?? "http"}://${req.headers.get("host")}/api/repos/${repo}/lfs/objects`;
+
       if (operation === "upload") {
         if (exists) return { oid: obj.oid, size: obj.size };
-        // S3: pre-signed URL for direct upload. FS: proxy through function.
-        const href = useS3 && "getUploadUrl" in lfs
-          ? await lfs.getUploadUrl(obj.oid)
-          : `${req.headers.get("x-forwarded-proto") ?? "http"}://${req.headers.get("host")}/api/repos/${repo}/lfs/objects/${obj.oid}`;
+        // For Blob: check if store provides direct URLs, otherwise proxy
+        const directUrl = "getUploadUrl" in lfs ? await lfs.getUploadUrl(obj.oid) : null;
         return {
           oid: obj.oid,
           size: obj.size,
           authenticated: true,
-          actions: { upload: { href } },
+          actions: { upload: { href: directUrl ?? `${baseUrl}/${obj.oid}` } },
         };
       } else {
         if (!exists) {
           return { oid: obj.oid, size: obj.size, error: { code: 404, message: "Not found" } };
         }
-        const href = useS3 && "getDownloadUrl" in lfs
-          ? await lfs.getDownloadUrl(obj.oid)
-          : `${req.headers.get("x-forwarded-proto") ?? "http"}://${req.headers.get("host")}/api/repos/${repo}/lfs/objects/${obj.oid}`;
+        const directUrl = "getDownloadUrl" in lfs ? await lfs.getDownloadUrl(obj.oid) : null;
         return {
           oid: obj.oid,
           size: obj.size,
           authenticated: true,
-          actions: { download: { href } },
+          actions: { download: { href: directUrl ?? `${baseUrl}/${obj.oid}` } },
         };
       }
     }),
