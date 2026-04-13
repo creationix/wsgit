@@ -1,6 +1,7 @@
 import { upgradeWebSocket, type WebSocketData } from "@vercel/functions";
 import { NextRequest, NextResponse } from "next/server";
 import path from "node:path";
+import { S3Client } from "@aws-sdk/client-s3";
 import {
   ObjectStore,
   RefStore,
@@ -8,36 +9,49 @@ import {
   PushHandler,
   FetchHandler,
 } from "@ws-git/server";
+import { S3ObjectStore } from "../../../lib/s3-object-store";
+import { S3RefStore } from "../../../lib/s3-ref-store";
+import { S3LfsStore } from "../../../lib/s3-lfs-store";
 
+const useS3 = !!process.env.WSGIT_S3_BUCKET;
 const STORE_ROOT = process.env.WSGIT_STORE ?? "/tmp/wsgit-store";
+const S3_BUCKET = process.env.WSGIT_S3_BUCKET ?? "";
+
+const s3 = useS3 ? new S3Client({}) : null;
 
 // Per-repo stores, lazily created
-const objectStores = new Map<string, ObjectStore>();
-const refStores = new Map<string, RefStore>();
-const lfsStores = new Map<string, LfsStore>();
+const objectStores = new Map<string, any>();
+const refStores = new Map<string, any>();
+const lfsStores = new Map<string, any>();
 
-function getObjects(repo: string): ObjectStore {
+function getObjects(repo: string) {
   let store = objectStores.get(repo);
   if (!store) {
-    store = new ObjectStore(path.join(STORE_ROOT, repo, "objects"));
+    store = useS3
+      ? new S3ObjectStore(s3!, S3_BUCKET, repo)
+      : new ObjectStore(path.join(STORE_ROOT, repo, "objects"));
     objectStores.set(repo, store);
   }
   return store;
 }
 
-function getRefs(repo: string): RefStore {
+function getRefs(repo: string) {
   let store = refStores.get(repo);
   if (!store) {
-    store = new RefStore(path.join(STORE_ROOT, repo, "refs.db"));
+    store = useS3
+      ? new S3RefStore(s3!, S3_BUCKET, repo)
+      : new RefStore(path.join(STORE_ROOT, repo, "refs.db"));
     refStores.set(repo, store);
   }
   return store;
 }
 
-function getLfs(repo: string): LfsStore {
+function getLfs(repo: string) {
   let store = lfsStores.get(repo);
   if (!store) {
-    store = new LfsStore(path.join(STORE_ROOT, repo, "lfs"));
+    store = useS3
+      ? new S3LfsStore(s3!, S3_BUCKET, repo)
+      : new LfsStore(path.join(STORE_ROOT, repo, "lfs"));
     lfsStores.set(repo, store);
   }
   return store;
@@ -166,9 +180,6 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ path
 
 async function handleLfsBatch(req: NextRequest, repo: string, body: any) {
   const lfs = getLfs(repo);
-  const host = req.headers.get("host") ?? "localhost:3000";
-  const proto = req.headers.get("x-forwarded-proto") ?? "http";
-  const baseUrl = `${proto}://${host}/api/repos/${repo}/lfs/objects`;
   const { operation, objects: requested } = body;
 
   console.log(`[lfs] ${repo} batch ${operation} — ${requested.length} objects`);
@@ -179,21 +190,28 @@ async function handleLfsBatch(req: NextRequest, repo: string, body: any) {
 
       if (operation === "upload") {
         if (exists) return { oid: obj.oid, size: obj.size };
+        // S3: pre-signed URL for direct upload. FS: proxy through function.
+        const href = useS3 && "getUploadUrl" in lfs
+          ? await lfs.getUploadUrl(obj.oid)
+          : `${req.headers.get("x-forwarded-proto") ?? "http"}://${req.headers.get("host")}/api/repos/${repo}/lfs/objects/${obj.oid}`;
         return {
           oid: obj.oid,
           size: obj.size,
           authenticated: true,
-          actions: { upload: { href: `${baseUrl}/${obj.oid}` } },
+          actions: { upload: { href } },
         };
       } else {
         if (!exists) {
           return { oid: obj.oid, size: obj.size, error: { code: 404, message: "Not found" } };
         }
+        const href = useS3 && "getDownloadUrl" in lfs
+          ? await lfs.getDownloadUrl(obj.oid)
+          : `${req.headers.get("x-forwarded-proto") ?? "http"}://${req.headers.get("host")}/api/repos/${repo}/lfs/objects/${obj.oid}`;
         return {
           oid: obj.oid,
           size: obj.size,
           authenticated: true,
-          actions: { download: { href: `${baseUrl}/${obj.oid}` } },
+          actions: { download: { href } },
         };
       }
     }),
