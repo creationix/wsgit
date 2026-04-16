@@ -248,6 +248,75 @@ act as an always-there fallback; everything new is packed.
    intervals during long pushes? Periodic is safer but costs extra Blob
    writes.
 
+## Why not real packfiles?
+
+Tempting — git's pack + idx v2 is a proven format, and using it would
+give us tool compatibility and potential Smart HTTP fallback on the same
+storage. But the format has costs we don't want to pay here.
+
+### The showstopper: packfiles aren't append-only
+
+The pack header is `[magic:4][version:4][num-objects:4]`, written first.
+The object count must be known before you write entry 1, and there's a
+trailing SHA-1 checksum covering the whole file. You can't stream-flush
+a partial pack and resume later — you buffer the whole push in memory,
+compute the checksum, then write atomically.
+
+For a 2 GB push, that's 2 GB of function memory held for the duration.
+Our custom format flushes incrementally as the chunk-size cap is hit,
+with no need to know the final count in advance.
+
+### Wire format mismatch
+
+Our wire protocol uses lz4, packs use zlib. Writing a pack means
+decompressing lz4 and recompressing with zlib per object, which:
+
+- Adds CPU on the server hot path
+- Eliminates lz4's main advantage (≈20× faster than gzip/zlib)
+- Doesn't save bandwidth — the client already compressed the wire frame
+
+### Delta chains don't come for free
+
+Packfiles' main bandwidth win over loose objects is the delta chain.
+But our wire protocol doesn't carry deltas — clients send whole objects.
+To get the delta benefit we'd have to run delta compression at flush
+time, which is the slow part of `git repack -f` (the server-side
+equivalent of `git gc`).
+
+We could instead write a pack full of undeltified entries. Valid, but
+loses the main reason to use packs in the first place.
+
+### Index generation
+
+`.idx` v2 needs a fanout table, object-name table, CRC-32 per object,
+and a trailer. Not hard, but not trivial. Pure-JS implementations exist
+(isomorphic-git ships one) at the cost of another dependency on the
+hot path.
+
+### Comparison
+
+| | Custom chunks | Packfiles |
+|---|---|---|
+| Blob ops per push | 2–3 | 2–3 (same) |
+| Streaming flush | ✓ | ✗ — buffer whole push |
+| Max push size | flushed incrementally | bounded by function memory |
+| CPU per object | lz4 passthrough | lz4→zlib transcode |
+| Delta bandwidth savings | none | significant (but requires delta computation) |
+| Git tool compat | none | full |
+| Code complexity | ~200 LOC | ~1000+ LOC or native dep |
+| Cold-start index load | 36 B/obj in memory | fanout table, smaller |
+
+### Migration path preserved
+
+Our custom chunk entry (`[type:1][hash:20][len:4][lz4-body]`) is
+trivially convertible to pack entry format. Our index is a subset of
+idx v2's fields. If operational pressure later demands packfile
+compatibility — for Smart HTTP fallback, or for delta-enabled repacks —
+the data is already in a convertible shape. One-time rewrite, no data
+loss.
+
+The packfile road is open. We're just not starting there.
+
 ## Non-goals
 
 - **Delta encoding**. Git's pack delta chains save bandwidth but add
