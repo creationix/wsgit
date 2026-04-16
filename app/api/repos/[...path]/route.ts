@@ -14,6 +14,7 @@ import { BlobLfsStore } from "../../../lib/blob-lfs-store";
 
 const useBlob = !!process.env.BLOB_READ_WRITE_TOKEN;
 const STORE_ROOT = process.env.WSGIT_STORE ?? "/tmp/wsgit-store";
+console.log(`[wsgit] storage backend: ${useBlob ? "Vercel Blob" : "filesystem"}`);
 
 // Per-repo stores, lazily created
 const objectStores = new Map<string, any>();

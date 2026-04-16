@@ -51,15 +51,21 @@ export class BlobObjectStore {
 
   async has(hash: Sha1Hex): Promise<boolean> {
     if (this.known.has(hash)) return true;
-    // Use list with exact prefix + limit 1 as lightweight existence check
-    const { blobs } = await list({
-      prefix: this.pathname(hash),
-      limit: 1,
-    });
-    if (blobs.length > 0) {
-      this.known.add(hash);
-      return true;
+    const start = Date.now();
+    try {
+      const { blobs } = await list({
+        prefix: this.pathname(hash),
+        limit: 1,
+      });
+      console.log(`[blob] has(${hash.slice(0, 8)}) = ${blobs.length > 0} in ${Date.now() - start}ms`);
+      if (blobs.length > 0) {
+        this.known.add(hash);
+        return true;
+      }
+      return false;
+    } catch (err: any) {
+      console.log(`[blob] has(${hash.slice(0, 8)}) error in ${Date.now() - start}ms: ${err.message}`);
+      throw err;
     }
-    return false;
   }
 }
