@@ -6,8 +6,8 @@ Vercel Blob as durable storage, April 2026.
 ## TL;DR
 
 - **WebSocket upgrade via `@vercel/functions.upgradeWebSocket()` works.**
-  Requires staging rusty runtime layer + `websocketFunctions` project
-  flag. Clean path once the infra is in place.
+  Clean API — returns a handle with `.on()`/`.send()` from an ordinary
+  route handler, no manual HTTP upgrade needed.
 - **Vercel Blob works for correctness**, but per-object storage
   architecture is fundamentally misaligned with Blob's cost and latency
   profile. A full clone of a 300K-object repo would cost ~$3 in Blob
@@ -70,9 +70,10 @@ $ git push vercel main
 
 ### LFS Batch API
 
-Matthew's test project confirmed `upgradeWebSocket()` works over staging.
-Our LFS endpoints return well-formed batch responses and proxy uploads
-through the PUT handler. Not end-to-end tested with real LFS content
+LFS endpoints return well-formed batch responses and proxy uploads
+through the PUT handler. The client-side remote helper auto-configures
+`remote.<name>.lfsurl` so `git-lfs` discovers the server's Batch API
+without manual setup. Not end-to-end tested with real LFS content
 against the deployment, but the contract is verified.
 
 ## What broke (and got fixed)
@@ -99,7 +100,7 @@ to every call site in the push and fetch handlers. Both implementations
 ## Performance measurements
 
 All numbers from the `ws-git.vercel.app` production deployment with
-private Vercel Blob storage, DNS pointing at the staging-iad1 proxy.
+private Vercel Blob storage, measured over real internet.
 
 ### Small push (33 objects, 44 KB raw)
 
@@ -188,7 +189,7 @@ layout — see [STORAGE-DESIGN.md](STORAGE-DESIGN.md).
 
 `ws-git.vercel.app` is live with:
 
-- Next.js app on Vercel with WebSocket support (via staging rusty layer)
+- Next.js app on Vercel with WebSocket support
 - Vercel Blob as durable storage
 - LFS batch endpoint functional
 - Per-repo isolation (objects, refs, LFS all prefixed by `<owner>/<repo>`)
@@ -199,9 +200,8 @@ large repos until the packed storage design lands.
 ## Takeaways
 
 1. **Vercel Functions can host stateful WebSocket services.** The
-   `upgradeWebSocket()` API is clean and the infrastructure works once
-   the flags are in place. This removes a major reason to go elsewhere
-   for the server layer.
+   `upgradeWebSocket()` API is clean and the runtime integration works.
+   This removes a major reason to go elsewhere for the server layer.
 
 2. **Vercel Blob is the wrong primitive for per-object storage.** Its
    cost model and latency profile are tuned for asset delivery, not
