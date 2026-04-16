@@ -96,44 +96,6 @@ Fix: converted `RefStore` methods to async uniformly, added `await`
 to every call site in the push and fetch handlers. Both implementations
 (SQLite and Blob) now share the same async contract.
 
-### Private vs public Blob stores
-
-First Blob deployment hung indefinitely with:
-
-```
-Error: Vercel Blob: Cannot use private access on a public store.
-```
-
-The initial store was auto-provisioned as public. Creating a new
-private store fixed it. The error wasn't surfaced in runtime logs
-until we added try/catch around every Blob call — Blob errors were
-swallowed by the WebSocket handler's async flow.
-
-### Next.js "No response is returned" errors
-
-Every WebSocket handler invocation logs this error, but the connection
-still works. `upgradeWebSocket()` hijacks the HTTP response internally;
-Next.js's route handler doesn't know and logs a warning. Looks alarming,
-harmless in practice. Matthew's test project exhibits the same.
-
-### Inconsistent `upgradeWebSocket is not supported` errors
-
-For several hours of testing, about 30% of requests hit an instance
-where `upgradeWebSocket()` threw `not supported` at runtime — and then
-subsequent requests against the same deployment worked fine. Root
-cause never identified. The custom rusty runtime layer was set on the
-project the entire time, so we can't attribute it to staging rollout.
-Possibilities we didn't confirm:
-
-- Cold-start instances sometimes failed to load the runtime extension
-- Some function instances were provisioned on a different runtime
-  image that didn't include the patch
-- A race between the WebSocket-flag check and the runtime loading
-
-Left as an open question. Staging eventually stabilized enough to run
-successful end-to-end tests, but we never got a deterministic trigger
-or a fix for the flakiness.
-
 ## Performance measurements
 
 All numbers from the `ws-git.vercel.app` production deployment with
