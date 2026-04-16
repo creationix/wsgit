@@ -9,9 +9,9 @@
     "wsgit-server": "packages/server/dist/cli.js"
   },
   "scripts": {
-    "build": "npm run build --workspaces",
+    "build": "npm run build -w packages/protocol && npm run build -w packages/server -w packages/client -w packages/bench",
     "dev": "next dev",
-    "vercel-build": "npm run build --workspaces && next build",
+    "vercel-build": "npm run build && next build",
     "test": "vitest run",
     "test:watch": "vitest"
   },
