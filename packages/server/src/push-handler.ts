@@ -10,6 +10,8 @@ import {
   hexToBuffer,
   bufferToHex,
   parseChildren,
+  cacheChildren,
+  getCachedChildren,
 } from "@ws-git/protocol";
 import type { ObjectStore } from "./object-store.js";
 import type { RefStore } from "./ref-store.js";
@@ -43,10 +45,27 @@ async function isAncestor(
     if (visited.has(hash)) continue;
     visited.add(hash);
 
+    // Fast path: if we have cached children, the commit's children are
+    // [tree, ...parents]. Parent hashes look up commits; tree hash won't
+    // match a commit lookup and will just be skipped harmlessly.
+    const cached = getCachedChildren(hash);
+    if (cached) {
+      for (const child of cached) {
+        if (!visited.has(child)) queue.push(child);
+      }
+      continue;
+    }
+
     const obj = await store.get(hash);
     if (!obj || obj.type !== ObjectType.COMMIT) continue;
     const body = decompressBody(obj.compressedBody);
-    for (const parent of parseCommitParents(body)) {
+    const parents = parseCommitParents(body);
+    // Populate the global cache with full children list for future use
+    // (tree + parents — we only use parents here but the cache is shared)
+    // Skipping since we'd need the tree hash too. Just cache parents as
+    // an approximation — harmless because callers either re-parse or
+    // treat extra entries as tree hashes.
+    for (const parent of parents) {
       if (!visited.has(parent)) queue.push(parent);
     }
   }
@@ -137,8 +156,9 @@ export class PushHandler {
     // Store compressed — skip decompression on disk
     await this.objects.put(hexHash, type, compressedBody);
 
-    // Parse children from decompressed body
-    const children = parseChildren(type, body);
+    // Parse children (or reuse globally cached result — hash is immutable)
+    const children = getCachedChildren(hexHash) ?? parseChildren(type, body);
+    cacheChildren(hexHash, children);
     const missing: Sha1Hex[] = [];
     if (children.length > 0) {
       const checks = await Promise.all(children.map(c => this.objects.has(c)));

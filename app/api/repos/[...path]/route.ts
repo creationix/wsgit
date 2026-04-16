@@ -82,9 +82,17 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ path
   }
 
   const ws = upgradeWebSocket();
+  const objects = getObjects(repo);
+
+  // Preload the known-objects cache in the background (Blob only).
+  // First caller per repo triggers the full list(); subsequent callers
+  // share the same promise.
+  if ("preload" in objects && typeof objects.preload === "function") {
+    objects.preload();
+  }
 
   if (endpoint === "push") {
-    const handler = new PushHandler(ws as any, getObjects(repo), getRefs(repo));
+    const handler = new PushHandler(ws as any, objects, getRefs(repo));
     let objectCount = 0;
     const startTime = Date.now();
 
@@ -114,7 +122,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ path
       console.log(`[${repo}] push disconnected — ${objectCount} objects in ${elapsed}s`);
     });
   } else {
-    const handler = new FetchHandler(ws as any, getObjects(repo), getRefs(repo));
+    const handler = new FetchHandler(ws as any, objects, getRefs(repo));
 
     ws.on("message", (data: WebSocketData) => {
       const buf = Buffer.from(data as ArrayBuffer);
