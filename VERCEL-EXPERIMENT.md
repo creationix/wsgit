@@ -130,17 +130,24 @@ order of magnitude.
 
 ### Cost estimate (Vercel Pro, approximate)
 
-For the 300K-object full push (if it could complete):
+For the 300K-object full push (if it could complete). Assumes the
+preload optimization (bulk `list({ limit: 1000 })`) has populated the
+known set, so `has()` is an in-memory lookup. The dominant cost is
+the per-object `put()`:
 
 | Item | Estimate |
 |---|---|
 | Blob PUTs (300K × $5/M) | ~$1.50 |
-| Blob LISTs for `has()` (300K × $5/M) | ~$1.50 |
+| Blob LISTs for preload (300 × $5/M) | ~$0.002 |
 | Blob storage (~700 MB) | ~$0.02/month |
 | Function active CPU (~2.8 hrs × $0.128) | ~$0.36 |
-| Function memory (2.8 hrs × 1GB × $0.0106) | ~$0.03 |
+| Function memory (2.8 hrs × 1 GB × $0.0106) | ~$0.03 |
 | FDT outbound (700 MB × $0.15) | ~$0.10 |
-| **Total** | **~$3.50 per push** |
+| **Total** | **~$2.00 per push** |
+
+The initial push of an unpreloaded repo (first cold-start session)
+would do per-hash `list({ limit: 1 })` calls for every `has()` check
+instead — adding ~$1.50 on top. The preload + cached path avoids that.
 
 Incremental pushes (100 new objects) cost roughly **$0.001** each —
 effectively free.
@@ -150,9 +157,20 @@ effectively free.
 ### Blob's API surface is incompatible with per-object storage
 
 Blob doesn't have a cheap existence check like S3's `HeadObject`. The
-closest we could get is `list({ prefix, limit: 1 })`, which is a full
-API call (~100ms, counted as a list operation). For a graph walk that
-calls `has()` on every child of every object, this dominates latency.
+closest options are:
+
+- **`list({ prefix, limit: 1 })`** — one full API call (~100ms) to check
+  a single hash. Expensive per-hash, but how `has()` works before the
+  cache is primed.
+- **`list({ prefix: "<repo>/objects/", limit: 1000 })`** — bulk list
+  that returns up to 1000 entries per call. Used by `preload()` to
+  populate the in-memory `known` set at connection start. For 300K
+  objects, this is ~300 paginated calls (~30s of cold-start work)
+  rather than 300K individual checks.
+
+Once `known` is populated, every `has()` is free. But PUTs remain the
+hard cost: one API call per object stored, no way to batch with the
+current "one blob per object" layout.
 
 ### Caching helps but has limits
 
