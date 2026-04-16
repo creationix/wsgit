@@ -38,12 +38,12 @@ export class RefStore {
     );
   }
 
-  get(ref: string): Sha1Hex | null {
+  async get(ref: string): Promise<Sha1Hex | null> {
     const row = this.stmtGet.get(ref) as { hash: string } | undefined;
     return row?.hash ?? null;
   }
 
-  list(prefix: string): Record<string, Sha1Hex> {
+  async list(prefix: string): Promise<Record<string, Sha1Hex>> {
     const rows = this.stmtList.all(prefix) as { ref: string; hash: string }[];
     const result: Record<string, Sha1Hex> = {};
     for (const row of rows) {
@@ -53,7 +53,7 @@ export class RefStore {
   }
 
   /** Unconditional set (for force push). */
-  set(ref: string, hash: Sha1Hex): void {
+  async set(ref: string, hash: Sha1Hex): Promise<void> {
     this.stmtUpsert.run(ref, hash);
   }
 
@@ -61,7 +61,7 @@ export class RefStore {
    * Compare-and-swap. Returns true if the update succeeded.
    * If old is null, only succeeds if the ref doesn't exist yet.
    */
-  cas(ref: string, oldHash: Sha1Hex | null, newHash: Sha1Hex): boolean {
+  async cas(ref: string, oldHash: Sha1Hex | null, newHash: Sha1Hex): Promise<boolean> {
     if (oldHash === null) {
       const result = this.stmtInsert.run(ref, newHash);
       return result.changes > 0;

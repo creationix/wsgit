@@ -23,8 +23,8 @@ export class FetchHandler {
     private refs: RefStore,
   ) { }
 
-  handleControl(msg: FetchRequest): void {
-    const refs = this.refs.list(msg.ref);
+  async handleControl(msg: FetchRequest): Promise<void> {
+    const refs = await this.refs.list(msg.ref);
     this.ws.send(JSON.stringify({
       id: msg.id,
       status: "refs",

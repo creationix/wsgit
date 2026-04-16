@@ -204,22 +204,22 @@ export class PushHandler {
 
     if (force) {
       // Force push — unconditional set
-      this.refs.set(ref, newHash);
+      await this.refs.set(ref, newHash);
       this.sendDone(id, ref, newHash);
     } else if (oldHash !== undefined) {
       // Force-with-lease — compare-and-swap
-      if (this.refs.cas(ref, oldHash, newHash)) {
+      if (await this.refs.cas(ref, oldHash, newHash)) {
         this.sendDone(id, ref, newHash);
       } else {
-        const actual = this.refs.get(ref);
+        const actual = await this.refs.get(ref);
         this.sendError(id, "ref conflict", { expected: oldHash, actual });
       }
     } else {
       // Normal push — check fast-forward then CAS
-      const currentHash = this.refs.get(ref);
+      const currentHash = await this.refs.get(ref);
       if (currentHash === null) {
         // New ref
-        if (this.refs.cas(ref, null, newHash)) {
+        if (await this.refs.cas(ref, null, newHash)) {
           this.sendDone(id, ref, newHash);
         } else {
           this.sendError(id, "ref conflict");
@@ -229,7 +229,7 @@ export class PushHandler {
         const ff = await isAncestor(this.objects, newHash, currentHash);
         if (!ff) {
           this.sendError(id, "non-fast-forward", { current: currentHash });
-        } else if (this.refs.cas(ref, currentHash, newHash)) {
+        } else if (await this.refs.cas(ref, currentHash, newHash)) {
           this.sendDone(id, ref, newHash);
         } else {
           this.sendError(id, "ref conflict", { current: currentHash });
