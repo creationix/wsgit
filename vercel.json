@@ -4,9 +4,5 @@
   "installCommand": "npm install",
   "rewrites": [
     { "source": "/repos/:path*", "destination": "/api/repos/:path*" }
-  ],
-  "build": {
-    "env": {
-    }
-  }
+  ]
 }
