@@ -31,12 +31,15 @@ export class BlobRefStore {
   }
 
   async list(prefix: string): Promise<Record<string, Sha1Hex>> {
+    console.log(`[blob-ref] list(${prefix}) start`);
     const result: Record<string, Sha1Hex> = {};
     const pathPrefix = this.pathname(prefix);
 
     let cursor: string | undefined;
     do {
+      const start = Date.now();
       const res = await list({ prefix: pathPrefix, cursor, limit: 1000 });
+      console.log(`[blob-ref] list(${prefix}) blob.list returned ${res.blobs.length} in ${Date.now() - start}ms`);
       for (const blob of res.blobs) {
         const ref = blob.pathname.slice(`${this.repo}/refs/`.length);
         const hash = await this.get(ref);
@@ -45,6 +48,7 @@ export class BlobRefStore {
       cursor = res.cursor;
     } while (cursor);
 
+    console.log(`[blob-ref] list(${prefix}) done with ${Object.keys(result).length} refs`);
     return result;
   }
 
