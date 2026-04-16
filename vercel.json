@@ -7,7 +7,6 @@
   ],
   "build": {
     "env": {
-      "VERCEL_RUST_LAYER": "arn:aws:lambda:AWS_REGION_PLACEHOLDER:338764639016:layer:vercel-rusty-runtime-nodejs-1_43_4-staging-7b0baa617b-AWS_ARCH_PLACEHOLDER:1"
     }
   }
 }
