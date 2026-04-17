@@ -4,5 +4,10 @@
   "installCommand": "npm install",
   "rewrites": [
     { "source": "/repos/:path*", "destination": "/api/repos/:path*" }
-  ]
+  ],
+  "build": {
+    "env": {
+      "VERCEL_RUST_LAYER": "arn:aws:lambda:AWS_REGION_PLACEHOLDER:338764639016:layer:vercel-rusty-runtime-nodejs-1_44_0-staging-10b4327310-AWS_ARCH_PLACEHOLDER:1"
+    }
+  }
 }

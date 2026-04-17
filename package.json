@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@vercel/blob": "^2.3.3",
-    "@vercel/functions": "https://vercel-h2j0px0hh.vercel.sh/tarballs/%40vercel/functions.tgz",
+    "@vercel/functions": "https://vercel-91m58ts2s.vercel.sh/tarballs/%40vercel/functions.tgz",
     "next": "^16.2.3",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
