@@ -135,6 +135,24 @@ async function doPush(
     let wireBytes = 0;
     const startTime = Date.now();
     let lastProgress = startTime;
+    let lastActivity = startTime;
+    let settled = false;
+
+    const STALL_MS = 120_000;
+    const stallTimer = setInterval(() => {
+      if (Date.now() - lastActivity > STALL_MS) {
+        process.stderr.write(`\n[wsgit] push stalled — no server response for ${STALL_MS / 1000}s\n`);
+        try { ws.close(); } catch { /* ignore */ }
+        finish();
+        reject(new Error(`push stalled after ${STALL_MS / 1000}s with no server activity`));
+      }
+    }, 15_000);
+
+    function finish() {
+      if (settled) return;
+      settled = true;
+      clearInterval(stallTimer);
+    }
 
     function showProgress() {
       const now = Date.now();
@@ -147,6 +165,7 @@ async function doPush(
     }
 
     ws.on("open", () => {
+      lastActivity = Date.now();
       const ctrl: Record<string, unknown> = {
         id: 1,
         ref: remoteRef,
@@ -158,6 +177,7 @@ async function doPush(
     });
 
     ws.on("message", async (data, isBinary) => {
+      lastActivity = Date.now();
       if (isBinary) {
         // Server is asking for objects via want frames
         const wanted = decodeWantFrame(Buffer.from(data as ArrayBuffer));
@@ -187,6 +207,7 @@ async function doPush(
         const ratio = rawBytes > 0 ? ((1 - wireBytes / rawBytes) * 100).toFixed(0) : "0";
         process.stderr.write(`\r[wsgit] pushed ${sent} objects, ${formatSize(rawBytes)} -> ${formatSize(wireBytes)} (${ratio}% smaller), ${formatRate(wireBytes, totalElapsed)} wire\n`);
         ws.close();
+        finish();
         if (msg.status === "done") {
           resolve({ ok: true });
         } else {
@@ -195,7 +216,16 @@ async function doPush(
       }
     });
 
-    ws.on("error", reject);
+    ws.on("close", () => {
+      if (settled) return;
+      finish();
+      reject(new Error("WebSocket closed before server sent a result"));
+    });
+
+    ws.on("error", (err) => {
+      finish();
+      reject(err);
+    });
   });
 }
 

@@ -95,17 +95,36 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ path
     const handler = new PushHandler(ws as any, objects, getRefs(repo));
     let objectCount = 0;
     const startTime = Date.now();
+    let lastActivity = Date.now();
 
     handler.onResult = (ref, status, message) => {
       console.log(`[${repo}] push ${ref} ${status}${message ? ": " + message : ""}`);
     };
 
+    // Idle timeout — if no frame arrives for 90s, error the stream and
+    // close. Catches hung pushes (e.g. server-side exception leaving an
+    // orphan hash in expectSet) instead of waiting out the function limit.
+    const STALL_MS = 90_000;
+    const stallTimer = setInterval(() => {
+      if (Date.now() - lastActivity > STALL_MS) {
+        console.error(`[${repo}] push stalled — no frames for ${STALL_MS}ms, closing`);
+        try {
+          ws.send(JSON.stringify({ id: 0, status: "error", message: "idle timeout" }));
+        } catch { /* socket may already be half-closed */ }
+        clearInterval(stallTimer);
+        ws.close();
+      }
+    }, 15_000);
+
     ws.on("message", (data: WebSocketData) => {
+      lastActivity = Date.now();
       const buf = Buffer.from(data as ArrayBuffer);
       // Binary frames: first byte 1-5 = object, otherwise JSON
       if (buf.length > 21 && buf[0] >= 1 && buf[0] <= 5) {
         objectCount++;
-        handler.handleObject(buf);
+        handler.handleObject(buf).catch((err) => {
+          console.error(`[${repo}] handleObject threw:`, err);
+        });
       } else {
         const msg = JSON.parse(buf.toString());
         if (msg.skip) {
@@ -118,6 +137,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ path
     });
 
     ws.on("close", () => {
+      clearInterval(stallTimer);
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       console.log(`[${repo}] push disconnected — ${objectCount} objects in ${elapsed}s`);
     });

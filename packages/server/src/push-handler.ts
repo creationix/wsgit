@@ -129,51 +129,67 @@ export class PushHandler {
   }
 
   async handleObject(data: Buffer): Promise<void> {
-    const frame = decodeObjectFrameRaw(data);
-    if (!frame) {
-      this.sendError(0, "invalid object frame");
-      return;
-    }
-
-    const { type, hash, body, compressedBody } = frame;
-    const hexHash = bufferToHex(hash);
-
-    // Find which stream(s) expect this hash
-    const matchingStreams: PushStream[] = [];
-    for (const stream of this.streams.values()) {
-      if (stream.expectSet.has(hexHash)) {
-        matchingStreams.push(stream);
+    // Any throw below would leave the hash stuck in expectSet and hang
+    // the client — catch at the top so we can fail the stream cleanly.
+    try {
+      const frame = decodeObjectFrameRaw(data);
+      if (!frame) {
+        this.sendError(0, "invalid object frame");
+        return;
       }
-    }
 
-    if (matchingStreams.length === 0) {
-      // Object already in store (e.g. resumed push) — silently ignore
-      if (await this.objects.has(hexHash)) return;
-      this.sendError(0, `unexpected object: ${hexHash}`);
-      return;
-    }
+      const { type, hash, body, compressedBody } = frame;
+      const hexHash = bufferToHex(hash);
 
-    // Store compressed — skip decompression on disk
-    await this.objects.put(hexHash, type, compressedBody);
-
-    // Parse children (or reuse globally cached result — hash is immutable)
-    const children = getCachedChildren(hexHash) ?? parseChildren(type, body);
-    cacheChildren(hexHash, children);
-    const missing: Sha1Hex[] = [];
-    if (children.length > 0) {
-      const checks = await Promise.all(children.map(c => this.objects.has(c)));
-      for (let i = 0; i < children.length; i++) {
-        if (!checks[i] && !this.skipped.has(children[i])) missing.push(children[i]);
+      // Find which stream(s) expect this hash
+      const matchingStreams: PushStream[] = [];
+      for (const stream of this.streams.values()) {
+        if (stream.expectSet.has(hexHash)) {
+          matchingStreams.push(stream);
+        }
       }
-    }
 
-    for (const stream of matchingStreams) {
-      stream.expectSet.delete(hexHash);
-      for (const child of missing) stream.expectSet.add(child);
-      this.sendWants(stream);
-      if (stream.expectSet.size === 0) {
-        await this.finalizeStream(stream);
+      if (matchingStreams.length === 0) {
+        // Object already in store (e.g. resumed push) — silently ignore
+        if (await this.objects.has(hexHash)) return;
+        this.sendError(0, `unexpected object: ${hexHash}`);
+        return;
       }
+
+      // Store compressed — skip decompression on disk
+      await this.objects.put(hexHash, type, compressedBody);
+
+      // Parse children (or reuse globally cached result — hash is immutable)
+      const children = getCachedChildren(hexHash) ?? parseChildren(type, body);
+      cacheChildren(hexHash, children);
+      const missing: Sha1Hex[] = [];
+      if (children.length > 0) {
+        const checks = await Promise.all(children.map(c => this.objects.has(c)));
+        for (let i = 0; i < children.length; i++) {
+          if (!checks[i] && !this.skipped.has(children[i])) missing.push(children[i]);
+        }
+      }
+
+      for (const stream of matchingStreams) {
+        stream.expectSet.delete(hexHash);
+        for (const child of missing) stream.expectSet.add(child);
+        this.sendWants(stream);
+        if (stream.expectSet.size === 0) {
+          await this.finalizeStream(stream);
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[push] handleObject failed:", msg);
+      this.failAllStreams(`object processing failed: ${msg}`);
+    }
+  }
+
+  /** Send an error for every active stream and clear them. */
+  private failAllStreams(message: string): void {
+    for (const stream of [...this.streams.values()]) {
+      this.streams.delete(stream.request.id);
+      this.sendError(stream.request.id, message);
     }
   }
 

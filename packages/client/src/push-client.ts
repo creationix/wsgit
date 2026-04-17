@@ -36,6 +36,8 @@ export async function pushObjects(
     let ws: WebSocket = new WebSocket(url);
     if (latency) ws = wrapWithLatency(ws, latency);
 
+    let settled = false;
+
     ws.on("open", () => {
       // Send control message
       ws.send(JSON.stringify(request));
@@ -50,6 +52,7 @@ export async function pushObjects(
     ws.on("message", (data) => {
       const msg = JSON.parse(data.toString()) as PushResponse;
       if (msg.id === request.id) {
+        settled = true;
         ws.close();
         resolve({
           id: msg.id,
@@ -60,6 +63,18 @@ export async function pushObjects(
       }
     });
 
-    ws.on("error", reject);
+    ws.on("close", () => {
+      if (!settled) {
+        settled = true;
+        reject(new Error("WebSocket closed before server sent a result"));
+      }
+    });
+
+    ws.on("error", (err) => {
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+    });
   });
 }
